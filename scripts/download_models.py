@@ -1,323 +1,408 @@
 #!/usr/bin/env python3
 """
-Скрипт загрузки CPU-only моделей для AGI Layer v3.9
+Скрипт загрузки всех моделей для AGI Layer v3.9
+Загружает Stable Diffusion, Phi-2, BLIP2, OCR и другие модели
 """
 
 import os
 import sys
-import argparse
 import asyncio
 import logging
 from pathlib import Path
 from typing import Dict, List
-import requests
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM, BlipProcessor, BlipForConditionalGeneration
+from diffusers import StableDiffusionPipeline
+from sentence_transformers import SentenceTransformer
+import easyocr
 from tqdm import tqdm
 
-# Добавление корневой директории в путь
-sys.path.append(str(Path(__file__).parent.parent))
-
-from config.models import MODELS, get_model_config, get_total_size_mb
-
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('/workspace/logs/model_download.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 class ModelDownloader:
-    """Класс для загрузки моделей"""
+    """Загрузчик моделей для AGI Layer"""
     
-    def __init__(self, models_path: str = "/app/models"):
+    def __init__(self, models_path: str = "/workspace/models"):
         self.models_path = Path(models_path)
         self.models_path.mkdir(parents=True, exist_ok=True)
-        self.logger = logging.getLogger(__name__)
         
-    def download_model(self, model_name: str, force: bool = False) -> bool:
+        # Конфигурация моделей
+        self.models_config = {
+            # Текстовые модели
+            "text_models": {
+                "phi-2": {
+                    "name": "microsoft/phi-2",
+                    "type": "causal_lm",
+                    "size": "2.7B",
+                    "description": "Компактная языковая модель от Microsoft"
+                },
+                "phi-2-instruct": {
+                    "name": "microsoft/phi-2",
+                    "type": "causal_lm", 
+                    "size": "2.7B",
+                    "description": "Phi-2 для инструкций"
+                }
+            },
+            
+            # Модели генерации изображений
+            "image_models": {
+                "stable-diffusion-v1-5": {
+                    "name": "runwayml/stable-diffusion-v1-5",
+                    "type": "diffusion",
+                    "size": "4GB",
+                    "description": "Stable Diffusion 1.5 для генерации изображений"
+                }
+            },
+            
+            # Модели анализа изображений
+            "vision_models": {
+                "blip2-base": {
+                    "name": "Salesforce/blip-image-captioning-base",
+                    "type": "vision_text",
+                    "size": "990MB", 
+                    "description": "BLIP2 для анализа изображений"
+                },
+                "blip2-large": {
+                    "name": "Salesforce/blip-image-captioning-large",
+                    "type": "vision_text",
+                    "size": "1.9GB",
+                    "description": "BLIP2 Large для детального анализа"
+                }
+            },
+            
+            # Модели эмбеддингов
+            "embedding_models": {
+                "sentence-transformer": {
+                    "name": "sentence-transformers/all-MiniLM-L6-v2",
+                    "type": "sentence_transformer",
+                    "size": "90MB",
+                    "description": "Модель для создания эмбеддингов"
+                },
+                "multilingual-e5": {
+                    "name": "intfloat/multilingual-e5-small",
+                    "type": "sentence_transformer", 
+                    "size": "118MB",
+                    "description": "Многоязычная модель эмбеддингов"
+                }
+            }
+        }
+        
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"Устройство для загрузки моделей: {self.device}")
+    
+    async def download_all_models(self):
+        """Загрузка всех моделей"""
+        logger.info("🚀 Начинаем загрузку всех моделей AGI Layer v3.9")
+        
+        total_models = sum(len(models) for models in self.models_config.values())
+        logger.info(f"Всего моделей к загрузке: {total_models}")
+        
+        # Создаем директории
+        self._create_directories()
+        
+        # Загружаем модели по категориям
+        for category, models in self.models_config.items():
+            logger.info(f"\n📦 Загрузка категории: {category}")
+            
+            for model_key, model_info in models.items():
+                try:
+                    await self._download_model(category, model_key, model_info)
+                except Exception as e:
+                    logger.error(f"❌ Ошибка загрузки {model_key}: {e}")
+        
+        # Загружаем дополнительные компоненты
+        await self._download_additional_components()
+        
+        # Проверяем загруженные модели
+        self._verify_models()
+        
+        logger.info("✅ Загрузка всех моделей завершена!")
+    
+    def _create_directories(self):
+        """Создание директорий для моделей"""
+        directories = [
+            "text_models",
+            "image_models", 
+            "vision_models",
+            "embedding_models",
+            "ocr_models",
+            "cache"
+        ]
+        
+        for directory in directories:
+            dir_path = self.models_path / directory
+            dir_path.mkdir(parents=True, exist_ok=True)
+            logger.info(f"📁 Создана директория: {dir_path}")
+    
+    async def _download_model(self, category: str, model_key: str, model_info: Dict):
         """Загрузка конкретной модели"""
+        model_name = model_info["name"]
+        model_type = model_info["type"]
+        model_size = model_info["size"]
+        
+        logger.info(f"⬇️ Загрузка {model_key} ({model_size}): {model_name}")
+        
+        # Определяем путь сохранения
+        save_path = self.models_path / category / model_key
+        
+        # Проверяем, не загружена ли модель уже
+        if save_path.exists() and any(save_path.iterdir()):
+            logger.info(f"✅ Модель {model_key} уже загружена, пропускаем")
+            return
+        
         try:
-            model_config = get_model_config(model_name)
-            model_dir = self.models_path / model_name
+            if model_type == "causal_lm":
+                await self._download_text_model(model_name, save_path)
+            elif model_type == "diffusion":
+                await self._download_diffusion_model(model_name, save_path)
+            elif model_type == "vision_text":
+                await self._download_vision_model(model_name, save_path)
+            elif model_type == "sentence_transformer":
+                await self._download_embedding_model(model_name, save_path)
             
-            # Проверка, существует ли модель
-            if model_dir.exists() and not force:
-                self.logger.info(f"Модель {model_name} уже существует")
-                return True
-            
-            self.logger.info(f"Загрузка модели {model_name}...")
-            model_dir.mkdir(exist_ok=True)
-            
-            # Загрузка через HuggingFace
-            if model_name == "stable_diffusion_1_5":
-                self._download_stable_diffusion(model_dir)
-            elif model_name == "phi_2":
-                self._download_phi2(model_dir)
-            elif model_name == "blip2":
-                self._download_blip2(model_dir)
-            elif model_name == "easyocr":
-                self._download_easyocr(model_dir)
-            elif model_name == "sentence_transformers":
-                self._download_sentence_transformers(model_dir)
-            else:
-                self.logger.error(f"Неизвестная модель: {model_name}")
-                return False
-            
-            self.logger.info(f"Модель {model_name} успешно загружена")
-            return True
+            logger.info(f"✅ Модель {model_key} успешно загружена")
             
         except Exception as e:
-            self.logger.error(f"Ошибка загрузки модели {model_name}: {e}")
-            return False
+            logger.error(f"❌ Ошибка загрузки модели {model_key}: {e}")
+            raise
     
-    def _download_stable_diffusion(self, model_dir: Path):
-        """Загрузка Stable Diffusion 1.5"""
-        from diffusers import StableDiffusionPipeline
+    async def _download_text_model(self, model_name: str, save_path: Path):
+        """Загрузка текстовой модели"""
+        logger.info(f"📝 Загрузка текстовой модели: {model_name}")
         
-        self.logger.info("Загрузка Stable Diffusion 1.5...")
-        pipeline = StableDiffusionPipeline.from_pretrained(
-            "runwayml/stable-diffusion-v1-5",
-            torch_dtype="float32",
-            use_safetensors=True
-        )
-        
-        pipeline.save_pretrained(model_dir)
-        
-        # Сохранение конфигурации
-        config = {
-            "model_name": "stable_diffusion_1_5",
-            "type": "image_gen",
-            "framework": "diffusers",
-            "loaded": True
-        }
-        
-        import json
-        with open(model_dir / "config.json", "w") as f:
-            json.dump(config, f, indent=2)
-    
-    def _download_phi2(self, model_dir: Path):
-        """Загрузка Phi-2"""
-        from transformers import AutoTokenizer, AutoModelForCausalLM
-        
-        self.logger.info("Загрузка Phi-2...")
-        
-        # Загрузка токенизатора
+        # Загружаем токенизатор
         tokenizer = AutoTokenizer.from_pretrained(
-            "microsoft/phi-2",
-            trust_remote_code=True
-        )
-        tokenizer.save_pretrained(model_dir)
-        
-        # Загрузка модели
-        model = AutoModelForCausalLM.from_pretrained(
-            "microsoft/phi-2",
-            torch_dtype="float32",
+            model_name,
             trust_remote_code=True,
-            device_map="cpu"
-        )
-        model.save_pretrained(model_dir)
-        
-        # Сохранение конфигурации
-        config = {
-            "model_name": "phi_2",
-            "type": "llm",
-            "framework": "transformers",
-            "loaded": True
-        }
-        
-        import json
-        with open(model_dir / "config.json", "w") as f:
-            json.dump(config, f, indent=2)
-    
-    def _download_blip2(self, model_dir: Path):
-        """Загрузка BLIP2"""
-        from transformers import Blip2Processor, Blip2ForConditionalGeneration
-        
-        self.logger.info("Загрузка BLIP2...")
-        
-        # Загрузка процессора
-        processor = Blip2Processor.from_pretrained(
-            "Salesforce/blip2-opt-2.7b"
-        )
-        processor.save_pretrained(model_dir)
-        
-        # Загрузка модели
-        model = Blip2ForConditionalGeneration.from_pretrained(
-            "Salesforce/blip2-opt-2.7b",
-            torch_dtype="float32",
-            device_map="cpu"
-        )
-        model.save_pretrained(model_dir)
-        
-        # Сохранение конфигурации
-        config = {
-            "model_name": "blip2",
-            "type": "vision",
-            "framework": "transformers",
-            "loaded": True
-        }
-        
-        import json
-        with open(model_dir / "config.json", "w") as f:
-            json.dump(config, f, indent=2)
-    
-    def _download_easyocr(self, model_dir: Path):
-        """Загрузка EasyOCR"""
-        import easyocr
-        
-        self.logger.info("Загрузка EasyOCR...")
-        
-        # Инициализация EasyOCR для загрузки моделей
-        reader = easyocr.Reader(
-            ['en', 'ru'],
-            gpu=False,
-            model_storage_directory=str(model_dir)
+            cache_dir=str(save_path)
         )
         
-        # Сохранение конфигурации
-        config = {
-            "model_name": "easyocr",
-            "type": "ocr",
-            "framework": "easyocr",
-            "languages": ["en", "ru"],
-            "loaded": True
-        }
+        # Загружаем модель
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float32,  # CPU совместимость
+            trust_remote_code=True,
+            cache_dir=str(save_path)
+        )
         
-        import json
-        with open(model_dir / "config.json", "w") as f:
-            json.dump(config, f, indent=2)
+        # Сохраняем локально
+        tokenizer.save_pretrained(str(save_path))
+        model.save_pretrained(str(save_path))
+        
+        logger.info(f"💾 Текстовая модель сохранена в {save_path}")
     
-    def _download_sentence_transformers(self, model_dir: Path):
-        """Загрузка SentenceTransformers"""
-        from sentence_transformers import SentenceTransformer
+    async def _download_diffusion_model(self, model_name: str, save_path: Path):
+        """Загрузка модели диффузии"""
+        logger.info(f"🎨 Загрузка модели генерации изображений: {model_name}")
         
-        self.logger.info("Загрузка SentenceTransformers...")
+        # Загружаем pipeline
+        pipeline = StableDiffusionPipeline.from_pretrained(
+            model_name,
+            torch_dtype=torch.float32,  # CPU совместимость
+            safety_checker=None,
+            requires_safety_checker=False,
+            cache_dir=str(save_path)
+        )
         
-        model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
-        model.save(model_dir)
+        # Сохраняем локально
+        pipeline.save_pretrained(str(save_path))
         
-        # Сохранение конфигурации
-        config = {
-            "model_name": "sentence_transformers",
-            "type": "embedding",
-            "framework": "sentence_transformers",
-            "model_type": "all-MiniLM-L6-v2",
-            "embedding_dimension": 384,
-            "loaded": True
-        }
-        
-        import json
-        with open(model_dir / "config.json", "w") as f:
-            json.dump(config, f, indent=2)
+        logger.info(f"💾 Модель диффузии сохранена в {save_path}")
     
-    def download_all_models(self, force: bool = False) -> Dict[str, bool]:
-        """Загрузка всех моделей"""
-        results = {}
+    async def _download_vision_model(self, model_name: str, save_path: Path):
+        """Загрузка модели анализа изображений"""
+        logger.info(f"👁️ Загрузка модели анализа изображений: {model_name}")
         
-        total_size = get_total_size_mb()
-        print(f"📥 Загрузка всех моделей (общий размер: {total_size} MB)")
+        # Загружаем процессор и модель
+        processor = BlipProcessor.from_pretrained(
+            model_name,
+            cache_dir=str(save_path)
+        )
         
-        for model_name in MODELS.keys():
-            print(f"\n🔄 Загрузка {model_name}...")
-            results[model_name] = self.download_model(model_name, force)
+        model = BlipForConditionalGeneration.from_pretrained(
+            model_name,
+            torch_dtype=torch.float32,
+            cache_dir=str(save_path)
+        )
         
-        return results
+        # Сохраняем локально
+        processor.save_pretrained(str(save_path))
+        model.save_pretrained(str(save_path))
+        
+        logger.info(f"💾 Модель анализа изображений сохранена в {save_path}")
     
-    def check_models(self) -> Dict[str, bool]:
-        """Проверка наличия моделей"""
-        results = {}
+    async def _download_embedding_model(self, model_name: str, save_path: Path):
+        """Загрузка модели эмбеддингов"""
+        logger.info(f"🔗 Загрузка модели эмбеддингов: {model_name}")
         
-        for model_name in MODELS.keys():
-            model_dir = self.models_path / model_name
-            config_file = model_dir / "config.json"
+        # Загружаем модель sentence transformer
+        model = SentenceTransformer(
+            model_name,
+            cache_folder=str(save_path)
+        )
+        
+        # Сохраняем локально
+        model.save(str(save_path))
+        
+        logger.info(f"💾 Модель эмбеддингов сохранена в {save_path}")
+    
+    async def _download_additional_components(self):
+        """Загрузка дополнительных компонентов"""
+        logger.info("📦 Загрузка дополнительных компонентов...")
+        
+        # EasyOCR модели
+        try:
+            logger.info("🔤 Инициализация EasyOCR...")
+            ocr_path = self.models_path / "ocr_models"
+            ocr_path.mkdir(exist_ok=True)
             
-            exists = model_dir.exists() and config_file.exists()
-            results[model_name] = exists
+            # Инициализируем EasyOCR (это автоматически загрузит модели)
+            reader = easyocr.Reader(
+                ['en', 'ru'],  # Английский и русский языки
+                model_storage_directory=str(ocr_path),
+                download_enabled=True
+            )
             
-            status = "✅" if exists else "❌"
-            print(f"{status} {model_name}: {'Готов' if exists else 'Отсутствует'}")
-        
-        return results
+            logger.info("✅ EasyOCR модели загружены")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки EasyOCR: {e}")
     
-    def get_disk_usage(self) -> Dict[str, int]:
-        """Получение информации об использовании диска"""
-        usage = {}
+    def _verify_models(self):
+        """Проверка загруженных моделей"""
+        logger.info("🔍 Проверка загруженных моделей...")
         
-        for model_name in MODELS.keys():
-            model_dir = self.models_path / model_name
-            if model_dir.exists():
-                total_size = sum(
-                    f.stat().st_size 
-                    for f in model_dir.rglob('*') 
-                    if f.is_file()
-                )
-                usage[model_name] = total_size // (1024 * 1024)  # MB
+        verification_results = {}
+        
+        for category in self.models_config:
+            category_path = self.models_path / category
+            if category_path.exists():
+                models_in_category = list(category_path.iterdir())
+                verification_results[category] = len(models_in_category)
+                logger.info(f"✅ {category}: {len(models_in_category)} моделей")
             else:
-                usage[model_name] = 0
+                verification_results[category] = 0
+                logger.warning(f"⚠️ {category}: директория не найдена")
         
-        return usage
+        # Проверяем общий размер
+        total_size = sum(
+            sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
+            for path in self.models_path.iterdir() if path.is_dir()
+        )
+        
+        total_size_gb = total_size / (1024**3)
+        logger.info(f"📊 Общий размер загруженных моделей: {total_size_gb:.2f} GB")
+        
+        # Сохраняем отчет
+        self._save_verification_report(verification_results, total_size_gb)
+    
+    def _save_verification_report(self, results: Dict, total_size: float):
+        """Сохранение отчета о загрузке"""
+        report_path = self.models_path / "download_report.txt"
+        
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write("AGI Layer v3.9 - Отчет о загрузке моделей\n")
+            f.write("=" * 50 + "\n\n")
+            f.write(f"Дата загрузки: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Устройство: {self.device}\n")
+            f.write(f"Общий размер: {total_size:.2f} GB\n\n")
+            
+            f.write("Загруженные модели по категориям:\n")
+            for category, count in results.items():
+                f.write(f"  {category}: {count} моделей\n")
+            
+            f.write("\nДетали моделей:\n")
+            for category, models in self.models_config.items():
+                f.write(f"\n{category}:\n")
+                for model_key, model_info in models.items():
+                    f.write(f"  - {model_key}: {model_info['name']} ({model_info['size']})\n")
+        
+        logger.info(f"📄 Отчет сохранен: {report_path}")
+
+    async def download_specific_models(self, model_list: List[str]):
+        """Загрузка конкретных моделей"""
+        logger.info(f"⬇️ Загрузка конкретных моделей: {model_list}")
+        
+        for model_key in model_list:
+            found = False
+            for category, models in self.models_config.items():
+                if model_key in models:
+                    model_info = models[model_key]
+                    await self._download_model(category, model_key, model_info)
+                    found = True
+                    break
+            
+            if not found:
+                logger.warning(f"⚠️ Модель {model_key} не найдена в конфигурации")
+
+    def get_available_models(self) -> Dict:
+        """Получение списка доступных моделей"""
+        return self.models_config
+
+    def get_download_status(self) -> Dict:
+        """Получение статуса загрузки"""
+        status = {}
+        
+        for category, models in self.models_config.items():
+            status[category] = {}
+            for model_key in models:
+                model_path = self.models_path / category / model_key
+                status[category][model_key] = {
+                    "downloaded": model_path.exists() and any(model_path.iterdir()) if model_path.exists() else False,
+                    "path": str(model_path)
+                }
+        
+        return status
 
 
-def main():
+async def main():
     """Основная функция"""
-    parser = argparse.ArgumentParser(description="Загрузка моделей AGI Layer v3.9")
-    parser.add_argument("--models-path", default="/app/models", help="Путь к моделям")
-    parser.add_argument("--model", help="Загрузить конкретную модель")
-    parser.add_argument("--all", action="store_true", help="Загрузить все модели")
-    parser.add_argument("--check", action="store_true", help="Проверить наличие моделей")
-    parser.add_argument("--check-only", action="store_true", help="Только проверка без загрузки")
-    parser.add_argument("--force", action="store_true", help="Принудительная загрузка")
-    parser.add_argument("--usage", action="store_true", help="Показать использование диска")
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Загрузчик моделей AGI Layer v3.9")
+    parser.add_argument("--models-path", default="/workspace/models", help="Путь для сохранения моделей")
+    parser.add_argument("--specific", nargs="+", help="Загрузить только конкретные модели")
+    parser.add_argument("--list", action="store_true", help="Показать список доступных моделей")
+    parser.add_argument("--status", action="store_true", help="Показать статус загрузки")
     
     args = parser.parse_args()
     
-    # Настройка логирования
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
     downloader = ModelDownloader(args.models_path)
     
-    if args.check or args.check_only:
-        print("🔍 Проверка моделей:")
-        results = downloader.check_models()
-        
-        if args.check_only:
-            return
-        
-        missing_models = [name for name, exists in results.items() if not exists]
-        if missing_models and args.all:
-            print(f"\n📥 Загрузка отсутствующих моделей: {missing_models}")
-            for model_name in missing_models:
-                downloader.download_model(model_name, args.force)
+    if args.list:
+        print("\n📋 Доступные модели:")
+        models = downloader.get_available_models()
+        for category, category_models in models.items():
+            print(f"\n{category}:")
+            for model_key, model_info in category_models.items():
+                print(f"  - {model_key}: {model_info['name']} ({model_info['size']})")
+        return
     
-    elif args.usage:
-        print("💾 Использование диска:")
-        usage = downloader.get_disk_usage()
-        total = 0
-        for model_name, size in usage.items():
-            print(f"  {model_name}: {size} MB")
-            total += size
-        print(f"  Общий размер: {total} MB")
+    if args.status:
+        print("\n📊 Статус загрузки:")
+        status = downloader.get_download_status()
+        for category, category_models in status.items():
+            print(f"\n{category}:")
+            for model_key, model_status in category_models.items():
+                status_icon = "✅" if model_status["downloaded"] else "❌"
+                print(f"  {status_icon} {model_key}")
+        return
     
-    elif args.model:
-        print(f"📥 Загрузка модели {args.model}")
-        success = downloader.download_model(args.model, args.force)
-        if success:
-            print(f"✅ Модель {args.model} успешно загружена")
-        else:
-            print(f"❌ Ошибка загрузки модели {args.model}")
-            sys.exit(1)
-    
-    elif args.all:
-        print("📥 Загрузка всех моделей")
-        results = downloader.download_all_models(args.force)
-        
-        failed_models = [name for name, success in results.items() if not success]
-        if failed_models:
-            print(f"❌ Ошибка загрузки моделей: {failed_models}")
-            sys.exit(1)
-        else:
-            print("✅ Все модели успешно загружены")
-    
+    if args.specific:
+        await downloader.download_specific_models(args.specific)
     else:
-        parser.print_help()
+        await downloader.download_all_models()
 
 
 if __name__ == "__main__":
-    main()
-
+    from datetime import datetime
+    asyncio.run(main())

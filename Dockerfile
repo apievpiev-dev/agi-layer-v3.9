@@ -1,54 +1,57 @@
-# AGI Layer v3.9 - Dockerfile для CPU-only архитектуры
-
+# AGI Layer v3.9 - Multi-Agent System Dockerfile
 FROM python:3.11-slim
 
-# Установка системных зависимостей
+# Устанавливаем системные зависимости
 RUN apt-get update && apt-get install -y \
+    curl \
+    wget \
+    git \
     build-essential \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    libgomp1 \
-    libglib2.0-0 \
+    libpq-dev \
     libgl1-mesa-glx \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
     libxrender-dev \
     libgomp1 \
-    wget \
-    curl \
-    git \
+    libgcc-s1 \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
-# Установка рабочей директории
-WORKDIR /app
+# Создаем рабочую директорию
+WORKDIR /workspace
 
-# Копирование файлов зависимостей
+# Копируем файлы зависимостей
 COPY requirements.txt .
 
-# Установка Python зависимостей
+# Устанавливаем Python зависимости
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Копирование исходного кода
-COPY . .
+# Создаем необходимые директории
+RUN mkdir -p /workspace/{agents,models,data,logs,memory,config,services}
 
-# Создание необходимых директорий
-RUN mkdir -p /app/logs /app/models /app/output/images /app/data/chroma /app/backups
+# Копируем исходный код
+COPY agents/ /workspace/agents/
+COPY services/ /workspace/services/
+COPY config/ /workspace/config/
+COPY scripts/ /workspace/scripts/
 
-# Установка прав доступа
-RUN chmod +x /app/scripts/*.sh 2>/dev/null || true
+# Устанавливаем права доступа
+RUN chmod +x /workspace/scripts/*.py || true
+
+# Создаем пользователя для безопасности
+RUN groupadd -r agi && useradd -r -g agi agi
+RUN chown -R agi:agi /workspace
+USER agi
 
 # Переменные окружения
-ENV PYTHONPATH=/app
+ENV PYTHONPATH="/workspace:$PYTHONPATH"
 ENV PYTHONUNBUFFERED=1
-ENV CUDA_VISIBLE_DEVICES=""
 
-# Точка входа
-COPY docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
 
-ENTRYPOINT ["/docker-entrypoint.sh"]
-
+# Команда по умолчанию
+CMD ["python", "-m", "agents.meta_agent"]

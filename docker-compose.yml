@@ -1,331 +1,380 @@
 version: '3.8'
 
 services:
-  # База данных PostgreSQL
+  # PostgreSQL Database
   postgres:
-    image: postgres:15-alpine
+    image: postgres:15
     container_name: agi_postgres
     environment:
-      POSTGRES_DB: agi_layer
-      POSTGRES_USER: agi_user
-      POSTGRES_PASSWORD: agi_password
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./config/database.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./logs:/workspace/logs
     ports:
       - "5432:5432"
     networks:
       - agi_network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  # ChromaDB для векторных данных
+  # ChromaDB Vector Database
   chromadb:
-    image: chromadb/chroma:latest
+    image: ghcr.io/chroma-core/chroma:latest
     container_name: agi_chromadb
+    environment:
+      - CHROMA_SERVER_HOST=0.0.0.0
+      - CHROMA_SERVER_HTTP_PORT=8000
     volumes:
-      - chroma_data:/chroma/chroma
+      - chromadb_data:/chroma/chroma
+      - ./logs:/workspace/logs
     ports:
       - "8000:8000"
     networks:
       - agi_network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  # Redis для очередей (для будущего расширения)
-  redis:
-    image: redis:7-alpine
-    container_name: agi_redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - agi_network
-    restart: unless-stopped
-
-  # MetaAgent - координатор системы
+  # MetaAgent - Coordinator
   meta_agent:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: agi_meta_agent
     environment:
-      - AGENT_NAME=meta_agent
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
-      - POSTGRES_DB=agi_layer
-      - POSTGRES_USER=agi_user
-      - POSTGRES_PASSWORD=agi_password
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
     volumes:
-      - ./agents:/app/agents
-      - ./config:/app/config
-      - ./logs:/app/logs
-      - ./models:/app/models
+      - ./agents:/workspace/agents
+      - ./models:/workspace/models
+      - ./data:/workspace/data
+      - ./logs:/workspace/logs
+      - ./memory:/workspace/memory
     ports:
-      - "8001:8000"
+      - "8001:8001"
     networks:
       - agi_network
     depends_on:
-      - postgres
-      - chromadb
-      - redis
+      postgres:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
     restart: unless-stopped
+    command: ["python", "-m", "agents.meta_agent"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  # TelegramAgent - управление через Telegram
+  # TelegramAgent - Bot Interface
   telegram_agent:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: agi_telegram_agent
     environment:
-      - AGENT_NAME=telegram_agent
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - TELEGRAM_CHAT_IDS=${TELEGRAM_CHAT_IDS}
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
-      - POSTGRES_DB=agi_layer
-      - POSTGRES_USER=agi_user
-      - POSTGRES_PASSWORD=agi_password
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     volumes:
-      - ./agents:/app/agents
-      - ./config:/app/config
-      - ./logs:/app/logs
+      - ./agents:/workspace/agents
+      - ./data:/workspace/data
+      - ./logs:/workspace/logs
     ports:
-      - "8002:8000"
+      - "8002:8002"
     networks:
       - agi_network
     depends_on:
-      - postgres
-      - meta_agent
+      postgres:
+        condition: service_healthy
+      meta_agent:
+        condition: service_healthy
     restart: unless-stopped
+    command: ["python", "-m", "agents.telegram_agent"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  # ImageAgent - генерация изображений
-  image_agent:
+  # ImageGenAgent - Image Generation
+  image_gen_agent:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: agi_image_agent
+    container_name: agi_image_gen_agent
     environment:
-      - AGENT_NAME=image_agent
+      - MODELS_PATH=/workspace/models
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
-      - POSTGRES_DB=agi_layer
-      - POSTGRES_USER=agi_user
-      - POSTGRES_PASSWORD=agi_password
-      - MODELS_PATH=/app/models
-      - OUTPUT_PATH=/app/output/images
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     volumes:
-      - ./agents:/app/agents
-      - ./config:/app/config
-      - ./logs:/app/logs
-      - ./models:/app/models
-      - ./output/images:/app/output/images
+      - ./agents:/workspace/agents
+      - ./models:/workspace/models
+      - ./data:/workspace/data
+      - ./logs:/workspace/logs
     ports:
-      - "8003:8000"
+      - "8003:8003"
     networks:
       - agi_network
     depends_on:
-      - postgres
-      - meta_agent
+      postgres:
+        condition: service_healthy
+      meta_agent:
+        condition: service_healthy
     restart: unless-stopped
+    command: ["python", "-m", "agents.image_gen_agent"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # Увеличиваем лимиты для генерации изображений
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
 
-  # TextAgent - обработка текста
-  text_agent:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: agi_text_agent
-    environment:
-      - AGENT_NAME=text_agent
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_DB=agi_layer
-      - POSTGRES_USER=agi_user
-      - POSTGRES_PASSWORD=agi_password
-      - MODELS_PATH=/app/models
-    volumes:
-      - ./agents:/app/agents
-      - ./config:/app/config
-      - ./logs:/app/logs
-      - ./models:/app/models
-    ports:
-      - "8004:8000"
-    networks:
-      - agi_network
-    depends_on:
-      - postgres
-      - meta_agent
-    restart: unless-stopped
-
-  # VisionAgent - анализ изображений
+  # VisionAgent - Image Analysis
   vision_agent:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: agi_vision_agent
     environment:
-      - AGENT_NAME=vision_agent
+      - MODELS_PATH=/workspace/models
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
-      - POSTGRES_DB=agi_layer
-      - POSTGRES_USER=agi_user
-      - POSTGRES_PASSWORD=agi_password
-      - MODELS_PATH=/app/models
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     volumes:
-      - ./agents:/app/agents
-      - ./config:/app/config
-      - ./logs:/app/logs
-      - ./models:/app/models
+      - ./agents:/workspace/agents
+      - ./models:/workspace/models
+      - ./data:/workspace/data
+      - ./logs:/workspace/logs
     ports:
-      - "8005:8000"
+      - "8004:8004"
     networks:
       - agi_network
     depends_on:
-      - postgres
-      - meta_agent
+      postgres:
+        condition: service_healthy
+      meta_agent:
+        condition: service_healthy
     restart: unless-stopped
+    command: ["python", "-m", "agents.vision_agent"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  # OCRAgent - распознавание текста
-  ocr_agent:
+  # MemoryAgent - Vector Memory
+  memory_agent:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: agi_ocr_agent
+    container_name: agi_memory_agent
     environment:
-      - AGENT_NAME=ocr_agent
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_DB=agi_layer
-      - POSTGRES_USER=agi_user
-      - POSTGRES_PASSWORD=agi_password
-      - MODELS_PATH=/app/models
-    volumes:
-      - ./agents:/app/agents
-      - ./config:/app/config
-      - ./logs:/app/logs
-      - ./models:/app/models
-    ports:
-      - "8006:8000"
-    networks:
-      - agi_network
-    depends_on:
-      - postgres
-      - meta_agent
-    restart: unless-stopped
-
-  # EmbeddingAgent - векторизация текста
-  embedding_agent:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: agi_embedding_agent
-    environment:
-      - AGENT_NAME=embedding_agent
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_DB=agi_layer
-      - POSTGRES_USER=agi_user
-      - POSTGRES_PASSWORD=agi_password
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
-      - MODELS_PATH=/app/models
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     volumes:
-      - ./agents:/app/agents
-      - ./config:/app/config
-      - ./logs:/app/logs
-      - ./models:/app/models
+      - ./agents:/workspace/agents
+      - ./models:/workspace/models
+      - ./memory:/workspace/memory
+      - ./logs:/workspace/logs
     ports:
-      - "8007:8000"
+      - "8005:8005"
     networks:
       - agi_network
     depends_on:
-      - postgres
-      - chromadb
-      - meta_agent
+      postgres:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+      meta_agent:
+        condition: service_healthy
     restart: unless-stopped
+    command: ["python", "-m", "agents.memory_agent"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  # RecoveryAgent - восстановление системы
+  # ReportAgent - Reports and Analytics
+  report_agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agi_report_agent
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - ./agents:/workspace/agents
+      - ./data:/workspace/data
+      - ./logs:/workspace/logs
+    ports:
+      - "8006:8006"
+    networks:
+      - agi_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      meta_agent:
+        condition: service_healthy
+    restart: unless-stopped
+    command: ["python", "-m", "agents.report_agent"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8006/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # WatchdogAgent - System Monitoring
+  watchdog_agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agi_watchdog_agent
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - ./agents:/workspace/agents
+      - ./logs:/workspace/logs
+      - /var/run/docker.sock:/var/run/docker.sock  # Для управления контейнерами
+    ports:
+      - "8007:8007"
+    networks:
+      - agi_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    command: ["python", "-m", "agents.watchdog_agent"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8007/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # RecoveryAgent - System Recovery
   recovery_agent:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: agi_recovery_agent
     environment:
-      - AGENT_NAME=recovery_agent
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
-      - POSTGRES_DB=agi_layer
-      - POSTGRES_USER=agi_user
-      - POSTGRES_PASSWORD=agi_password
-      - LOGS_PATH=/app/logs
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
     volumes:
-      - ./agents:/app/agents
-      - ./config:/app/config
-      - ./logs:/app/logs
+      - ./agents:/workspace/agents
+      - ./memory:/workspace/memory
+      - ./logs:/workspace/logs
+      - ./data:/workspace/data
     ports:
-      - "8008:8000"
+      - "8008:8008"
     networks:
       - agi_network
     depends_on:
-      - postgres
-      - meta_agent
+      postgres:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
     restart: unless-stopped
+    command: ["python", "-m", "agents.recovery_agent"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8008/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  # Web UI - интерфейс управления
-  web_ui:
+  # Web Dashboard - Streamlit Interface
+  web_dashboard:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: agi_web_ui
+    container_name: agi_web_dashboard
     environment:
-      - SERVICE_NAME=web_ui
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
-      - POSTGRES_DB=agi_layer
-      - POSTGRES_USER=agi_user
-      - POSTGRES_PASSWORD=agi_password
-      - WEB_UI_PORT=8501
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - STREAMLIT_SERVER_PORT=8501
     volumes:
-      - ./services:/app/services
-      - ./config:/app/config
-      - ./logs:/app/logs
-      - ./output:/app/output
+      - ./services:/workspace/services
+      - ./agents:/workspace/agents
+      - ./data:/workspace/data
+      - ./logs:/workspace/logs
     ports:
       - "8501:8501"
     networks:
       - agi_network
     depends_on:
-      - postgres
-      - meta_agent
+      postgres:
+        condition: service_healthy
+      meta_agent:
+        condition: service_healthy
     restart: unless-stopped
-
-  # Watchdog - контроль контейнеров
-  watchdog:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: agi_watchdog
-    environment:
-      - SERVICE_NAME=watchdog
-      - DOCKER_HOST=unix:///var/run/docker.sock
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./services:/app/services
-      - ./logs:/app/logs
-    networks:
-      - agi_network
-    restart: unless-stopped
-    privileged: true
+    command: ["streamlit", "run", "services/web_dashboard.py", "--server.address=0.0.0.0"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 volumes:
   postgres_data:
-  chroma_data:
-  redis_data:
+    driver: local
+  chromadb_data:
+    driver: local
 
 networks:
   agi_network:
     driver: bridge
-
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

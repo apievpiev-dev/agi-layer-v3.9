@@ -1,0 +1,331 @@
+version: '3.8'
+
+services:
+  # База данных PostgreSQL
+  postgres:
+    image: postgres:15-alpine
+    container_name: agi_postgres
+    environment:
+      POSTGRES_DB: agi_layer
+      POSTGRES_USER: agi_user
+      POSTGRES_PASSWORD: agi_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./config/database.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - agi_network
+    restart: unless-stopped
+
+  # ChromaDB для векторных данных
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: agi_chromadb
+    volumes:
+      - chroma_data:/chroma/chroma
+    ports:
+      - "8000:8000"
+    networks:
+      - agi_network
+    restart: unless-stopped
+
+  # Redis для очередей (для будущего расширения)
+  redis:
+    image: redis:7-alpine
+    container_name: agi_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - agi_network
+    restart: unless-stopped
+
+  # MetaAgent - координатор системы
+  meta_agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agi_meta_agent
+    environment:
+      - AGENT_NAME=meta_agent
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=agi_layer
+      - POSTGRES_USER=agi_user
+      - POSTGRES_PASSWORD=agi_password
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - ./agents:/app/agents
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./models:/app/models
+    ports:
+      - "8001:8000"
+    networks:
+      - agi_network
+    depends_on:
+      - postgres
+      - chromadb
+      - redis
+    restart: unless-stopped
+
+  # TelegramAgent - управление через Telegram
+  telegram_agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agi_telegram_agent
+    environment:
+      - AGENT_NAME=telegram_agent
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=agi_layer
+      - POSTGRES_USER=agi_user
+      - POSTGRES_PASSWORD=agi_password
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+    volumes:
+      - ./agents:/app/agents
+      - ./config:/app/config
+      - ./logs:/app/logs
+    ports:
+      - "8002:8000"
+    networks:
+      - agi_network
+    depends_on:
+      - postgres
+      - meta_agent
+    restart: unless-stopped
+
+  # ImageAgent - генерация изображений
+  image_agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agi_image_agent
+    environment:
+      - AGENT_NAME=image_agent
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=agi_layer
+      - POSTGRES_USER=agi_user
+      - POSTGRES_PASSWORD=agi_password
+      - MODELS_PATH=/app/models
+      - OUTPUT_PATH=/app/output/images
+    volumes:
+      - ./agents:/app/agents
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./models:/app/models
+      - ./output/images:/app/output/images
+    ports:
+      - "8003:8000"
+    networks:
+      - agi_network
+    depends_on:
+      - postgres
+      - meta_agent
+    restart: unless-stopped
+
+  # TextAgent - обработка текста
+  text_agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agi_text_agent
+    environment:
+      - AGENT_NAME=text_agent
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=agi_layer
+      - POSTGRES_USER=agi_user
+      - POSTGRES_PASSWORD=agi_password
+      - MODELS_PATH=/app/models
+    volumes:
+      - ./agents:/app/agents
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./models:/app/models
+    ports:
+      - "8004:8000"
+    networks:
+      - agi_network
+    depends_on:
+      - postgres
+      - meta_agent
+    restart: unless-stopped
+
+  # VisionAgent - анализ изображений
+  vision_agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agi_vision_agent
+    environment:
+      - AGENT_NAME=vision_agent
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=agi_layer
+      - POSTGRES_USER=agi_user
+      - POSTGRES_PASSWORD=agi_password
+      - MODELS_PATH=/app/models
+    volumes:
+      - ./agents:/app/agents
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./models:/app/models
+    ports:
+      - "8005:8000"
+    networks:
+      - agi_network
+    depends_on:
+      - postgres
+      - meta_agent
+    restart: unless-stopped
+
+  # OCRAgent - распознавание текста
+  ocr_agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agi_ocr_agent
+    environment:
+      - AGENT_NAME=ocr_agent
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=agi_layer
+      - POSTGRES_USER=agi_user
+      - POSTGRES_PASSWORD=agi_password
+      - MODELS_PATH=/app/models
+    volumes:
+      - ./agents:/app/agents
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./models:/app/models
+    ports:
+      - "8006:8000"
+    networks:
+      - agi_network
+    depends_on:
+      - postgres
+      - meta_agent
+    restart: unless-stopped
+
+  # EmbeddingAgent - векторизация текста
+  embedding_agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agi_embedding_agent
+    environment:
+      - AGENT_NAME=embedding_agent
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=agi_layer
+      - POSTGRES_USER=agi_user
+      - POSTGRES_PASSWORD=agi_password
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - MODELS_PATH=/app/models
+    volumes:
+      - ./agents:/app/agents
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./models:/app/models
+    ports:
+      - "8007:8000"
+    networks:
+      - agi_network
+    depends_on:
+      - postgres
+      - chromadb
+      - meta_agent
+    restart: unless-stopped
+
+  # RecoveryAgent - восстановление системы
+  recovery_agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agi_recovery_agent
+    environment:
+      - AGENT_NAME=recovery_agent
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=agi_layer
+      - POSTGRES_USER=agi_user
+      - POSTGRES_PASSWORD=agi_password
+      - LOGS_PATH=/app/logs
+    volumes:
+      - ./agents:/app/agents
+      - ./config:/app/config
+      - ./logs:/app/logs
+    ports:
+      - "8008:8000"
+    networks:
+      - agi_network
+    depends_on:
+      - postgres
+      - meta_agent
+    restart: unless-stopped
+
+  # Web UI - интерфейс управления
+  web_ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agi_web_ui
+    environment:
+      - SERVICE_NAME=web_ui
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=agi_layer
+      - POSTGRES_USER=agi_user
+      - POSTGRES_PASSWORD=agi_password
+      - WEB_UI_PORT=8501
+    volumes:
+      - ./services:/app/services
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./output:/app/output
+    ports:
+      - "8501:8501"
+    networks:
+      - agi_network
+    depends_on:
+      - postgres
+      - meta_agent
+    restart: unless-stopped
+
+  # Watchdog - контроль контейнеров
+  watchdog:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agi_watchdog
+    environment:
+      - SERVICE_NAME=watchdog
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./services:/app/services
+      - ./logs:/app/logs
+    networks:
+      - agi_network
+    restart: unless-stopped
+    privileged: true
+
+volumes:
+  postgres_data:
+  chroma_data:
+  redis_data:
+
+networks:
+  agi_network:
+    driver: bridge
+

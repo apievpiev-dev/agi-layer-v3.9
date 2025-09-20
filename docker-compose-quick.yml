@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  # Только основные сервисы для быстрого старта
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: agi_layer
+      POSTGRES_USER: agi_user
+      POSTGRES_PASSWORD: agi_pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  # Основной сервис (без тяжелых моделей)
+  agi-core:
+    build: .
+    environment:
+      - DATABASE_URL=postgresql://agi_user:agi_pass@postgres:5432/agi_layer
+      - REDIS_URL=redis://redis:6379
+      - MODE=minimal
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "8000:8000"
+      - "8501:8501"
+    volumes:
+      - ./logs:/app/logs
+      - ./models:/app/models
+
+volumes:
+  postgres_data:

@@ -8,3 +8,4 @@ git commit -m "Initial commit: AGI Layer v3.9 - CPU-only headless AGI infrastruc
 echo Git репозиторий инициализирован!
 echo Папка проекта: %CD%
 pause
+

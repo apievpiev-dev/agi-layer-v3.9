@@ -25,3 +25,4 @@ echo ✅ Готово! Проверьте статус:
 docker-compose ps
 
 pause
+

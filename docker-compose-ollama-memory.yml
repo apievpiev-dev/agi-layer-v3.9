@@ -1,0 +1,92 @@
+version: '3.8'
+
+services:
+  # База данных PostgreSQL для хранения истории чатов
+  postgres:
+    image: postgres:15-alpine
+    container_name: agi_postgres_memory
+    environment:
+      POSTGRES_DB: agi_layer
+      POSTGRES_USER: agi_user
+      POSTGRES_PASSWORD: agi_password
+    volumes:
+      - postgres_memory_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - agi_network
+    restart: unless-stopped
+
+  # ChromaDB для векторной памяти
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: agi_chromadb_memory
+    volumes:
+      - chroma_memory_data:/chroma/chroma
+    ports:
+      - "8000:8000"
+    networks:
+      - agi_network
+    restart: unless-stopped
+
+  # Ollama - локальный LLM сервер
+  ollama:
+    image: ollama/ollama:latest
+    container_name: agi_ollama_memory
+    volumes:
+      - ollama_memory_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - agi_network
+    restart: unless-stopped
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Ollama Chat with Memory - веб-интерфейс с памятью
+  ollama_chat_memory:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agi_ollama_chat_memory
+    environment:
+      - SERVICE_NAME=ollama_chat_memory
+      - OLLAMA_HOST=ollama
+      - OLLAMA_PORT=11434
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=agi_layer
+      - POSTGRES_USER=agi_user
+      - POSTGRES_PASSWORD=agi_password
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+    volumes:
+      - ./services:/app/services
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./models:/app/models
+    ports:
+      - "8503:8503"
+    networks:
+      - agi_network
+    depends_on:
+      - postgres
+      - chromadb
+      - ollama
+    restart: unless-stopped
+
+volumes:
+  postgres_memory_data:
+  chroma_memory_data:
+  ollama_memory_data:
+
+networks:
+  agi_network:
+    driver: bridge

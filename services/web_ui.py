@@ -13,6 +13,8 @@ import asyncpg
 import aiohttp
 from typing import Dict, Any, List
 import json
+import os
+from .ollama_chat import OllamaChatService, OllamaChatUI
 
 
 class WebUI:
@@ -23,6 +25,8 @@ class WebUI:
         self.logger = logging.getLogger(__name__)
         self.db_pool = None
         self.http_session = None
+        self.ollama_service = None
+        self.ollama_chat_ui = None
         
     async def initialize(self):
         """Инициализация Web UI"""
@@ -37,6 +41,12 @@ class WebUI:
         
         # HTTP сессия для API вызовов
         self.http_session = aiohttp.ClientSession()
+        
+        # Инициализация Ollama сервиса
+        ollama_url = self.config.get('ollama_url', 'http://localhost:11434')
+        self.ollama_service = OllamaChatService(ollama_url)
+        await self.ollama_service.initialize()
+        self.ollama_chat_ui = OllamaChatUI(self.ollama_service)
         
     async def run(self):
         """Запуск Streamlit приложения"""
@@ -70,6 +80,8 @@ class WebUI:
             await self._render_logs_page()
         elif page == 'settings':
             await self._render_settings_page()
+        elif page == 'ollama_chat':
+            await self._render_ollama_chat_page()
     
     async def _render_sidebar(self):
         """Отрисовка боковой панели"""
@@ -93,6 +105,9 @@ class WebUI:
             
             if st.button("⚙️ Настройки", use_container_width=True):
                 st.session_state.page = 'settings'
+            
+            if st.button("💬 Чат с Ollama", use_container_width=True):
+                st.session_state.page = 'ollama_chat'
             
             st.markdown("---")
             
@@ -580,6 +595,10 @@ class WebUI:
     async def _create_backup(self):
         """Создание резервной копии"""
         st.info("Функция создания бэкапа в разработке")
+    
+    async def _render_ollama_chat_page(self):
+        """Отрисовка страницы чата с Ollama"""
+        await self.ollama_chat_ui.render_chat_page()
 
 
 async def main():
@@ -593,7 +612,8 @@ async def main():
             'database': settings.POSTGRES_DB,
             'user': settings.POSTGRES_USER,
             'password': settings.POSTGRES_PASSWORD
-        }
+        },
+        'ollama_url': getattr(settings, 'OLLAMA_URL', 'http://localhost:11434')
     }
     
     web_ui = WebUI(config)

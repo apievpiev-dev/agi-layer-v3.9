@@ -1,366 +1,698 @@
 """
-TelegramAgent - интеграция с Telegram для управления AGI Layer v3.9
+TelegramAgent - агент для работы с Telegram Bot API
+Обрабатывает команды пользователей и взаимодействует с другими агентами
 """
 
 import asyncio
-import logging
-from typing import Dict, Any, Optional
+import json
+import os
 from datetime import datetime
-import aiohttp
-import asyncpg
-from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from typing import Dict, Any, Optional
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import uvicorn
 from .base_agent import BaseAgent, Task
 
 
+class TelegramMessage(BaseModel):
+    """Модель Telegram сообщения"""
+    chat_id: str
+    text: str
+    message_type: str = "text"
+    reply_markup: Optional[Dict] = None
+
+
 class TelegramAgent(BaseAgent):
-    """Агент для интеграции с Telegram"""
+    """Агент для работы с Telegram"""
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__("telegram_agent", config)
+        
+        # Конфигурация Telegram
         self.bot_token = config.get('telegram_token')
-        self.allowed_chat_id = config.get('telegram_chat_id')
+        self.allowed_chat_ids = config.get('telegram_chat_ids', [])
+        
+        if not self.bot_token:
+            raise ValueError("TELEGRAM_TOKEN не найден в конфигурации")
+        
+        # Telegram Bot
         self.bot: Optional[Bot] = None
         self.application: Optional[Application] = None
         
+        # FastAPI для HTTP API
+        self.app = FastAPI(title="TelegramAgent API", version="3.9")
+        self._setup_routes()
+        
+        # Статистика
+        self.message_stats = {
+            "received": 0,
+            "sent": 0,
+            "commands": 0,
+            "errors": 0
+        }
+        
+        # Контекст разговоров
+        self.conversation_context = {}
+    
+    def _setup_routes(self):
+        """Настройка FastAPI маршрутов"""
+        
+        @self.app.post("/send_message")
+        async def send_message_endpoint(message: TelegramMessage):
+            """Отправка сообщения через HTTP API"""
+            try:
+                await self._send_telegram_message(
+                    chat_id=message.chat_id,
+                    text=message.text,
+                    reply_markup=message.reply_markup
+                )
+                return {"status": "sent"}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @self.app.get("/status")
+        async def get_status():
+            """Статус агента"""
+            return await self.health_check()
+        
+        @self.app.post("/process_task")
+        async def process_task_endpoint(task_data: Dict[str, Any]):
+            """Обработка задачи через HTTP API"""
+            try:
+                task = Task(
+                    id=task_data["id"],
+                    agent_name=task_data["agent_name"],
+                    task_type=task_data["task_type"],
+                    data=task_data["data"]
+                )
+                
+                result = await self.process_task(task)
+                return result
+                
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+    
     async def _initialize_agent(self):
-        """Инициализация Telegram бота"""
-        if not self.bot_token:
-            raise ValueError("Telegram token не настроен")
-            
+        """Инициализация Telegram агента"""
+        self.logger.info("Инициализация TelegramAgent")
+        
+        # Создаем бота
         self.bot = Bot(token=self.bot_token)
+        
+        # Создаем приложение
         self.application = Application.builder().token(self.bot_token).build()
         
-        # Регистрация обработчиков команд
-        self.application.add_handler(CommandHandler("start", self._cmd_start))
-        self.application.add_handler(CommandHandler("status", self._cmd_status))
-        self.application.add_handler(CommandHandler("generate", self._cmd_generate))
-        self.application.add_handler(CommandHandler("report", self._cmd_report))
-        self.application.add_handler(CommandHandler("reboot", self._cmd_reboot))
+        # Регистрируем обработчики
+        self._register_handlers()
+        
+        # Запускаем HTTP сервер
+        asyncio.create_task(self._start_http_server())
+        
+        # Запускаем Telegram бота
+        asyncio.create_task(self._start_telegram_bot())
+        
+        self.logger.info("TelegramAgent инициализирован")
+    
+    async def _start_http_server(self):
+        """Запуск HTTP сервера"""
+        try:
+            config = uvicorn.Config(
+                app=self.app,
+                host="0.0.0.0",
+                port=8002,
+                log_level="info"
+            )
+            server = uvicorn.Server(config)
+            await server.serve()
+        except Exception as e:
+            self.logger.error(f"Ошибка запуска HTTP сервера: {e}")
+    
+    async def _start_telegram_bot(self):
+        """Запуск Telegram бота"""
+        try:
+            await self.application.initialize()
+            await self.application.start()
+            await self.application.updater.start_polling()
+            
+            self.logger.info("Telegram бот запущен")
+            
+            # Отправляем уведомление о запуске
+            if self.allowed_chat_ids:
+                for chat_id in self.allowed_chat_ids:
+                    await self._send_telegram_message(
+                        chat_id=str(chat_id),
+                        text="🤖 AGI Layer v3.9 запущен и готов к работе!\n\nИспользуйте /help для списка команд."
+                    )
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка запуска Telegram бота: {e}")
+    
+    def _register_handlers(self):
+        """Регистрация обработчиков Telegram"""
+        
+        # Команды
+        self.application.add_handler(CommandHandler("start", self._handle_start))
+        self.application.add_handler(CommandHandler("help", self._handle_help))
+        self.application.add_handler(CommandHandler("status", self._handle_status))
+        self.application.add_handler(CommandHandler("generate", self._handle_generate))
+        self.application.add_handler(CommandHandler("report", self._handle_report))
+        self.application.add_handler(CommandHandler("memory", self._handle_memory))
+        
+        # Обычные сообщения
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
         
-        # Запуск бота
-        await self.application.initialize()
-        await self.application.start()
+        # Фотографии
+        self.application.add_handler(MessageHandler(filters.PHOTO, self._handle_photo))
         
-        # Запуск polling
-        asyncio.create_task(self._run_polling())
-        
-        self.logger.info("Telegram бот инициализирован")
+        # Callback кнопки
+        self.application.add_handler(CallbackQueryHandler(self._handle_callback))
     
-    async def _run_polling(self):
-        """Запуск polling для получения сообщений"""
-        try:
-            await self.application.updater.start_polling()
-        except Exception as e:
-            self.logger.error(f"Ошибка polling: {e}")
-    
-    async def _check_authorization(self, update: Update) -> bool:
-        """Проверка авторизации пользователя"""
-        if not self.allowed_chat_id:
-            return True  # Если не настроен, разрешаем всем
-            
-        chat_id = str(update.effective_chat.id)
-        return chat_id == self.allowed_chat_id
-    
-    async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _handle_start(self, update: Update, context):
         """Обработка команды /start"""
-        if not await self._check_authorization(update):
-            await update.message.reply_text("Доступ запрещен")
-            return
+        try:
+            chat_id = str(update.effective_chat.id)
             
-        await self._log_telegram_message(update, "start")
-        
-        welcome_text = """
-🤖 AGI Layer v3.9 - Система управления
+            if not self._is_authorized(chat_id):
+                await update.message.reply_text("❌ У вас нет доступа к этому боту.")
+                return
+            
+            self.message_stats["commands"] += 1
+            
+            welcome_text = """🤖 **AGI Layer v3.9** - Добро пожаловать!
+            
+Я интеллектуальная система с множественными агентами:
 
-Доступные команды:
-/start - Показать это сообщение
-/status - Статус системы и агентов
-/generate [prompt] - Генерация изображения
-/report - Отчет о работе системы
-/reboot - Перезапуск системы
+🎨 **Генерация изображений** - создаю картинки по описанию
+👁️ **Анализ изображений** - понимаю содержимое фото
+🧠 **Память и знания** - запоминаю и ищу информацию
+📊 **Отчеты** - анализирую данные и создаю визуализации
+⚙️ **Мониторинг** - слежу за работой системы
 
-Система готова к работе!
-        """
-        
-        await update.message.reply_text(welcome_text)
+**Команды:**
+/help - список всех команд
+/status - статус системы
+/generate [описание] - генерация изображения
+/report - создать отчет
+/memory [запрос] - работа с памятью
+
+Просто отправьте мне сообщение или фото - я пойму что делать! 🚀"""
+            
+            keyboard = [
+                [InlineKeyboardButton("📊 Статус системы", callback_data="status")],
+                [InlineKeyboardButton("🎨 Генерация изображения", callback_data="generate")],
+                [InlineKeyboardButton("📈 Отчет", callback_data="report")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                welcome_text,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка обработки /start: {e}")
+            await update.message.reply_text("❌ Произошла ошибка при обработке команды.")
     
-    async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _handle_help(self, update: Update, context):
+        """Обработка команды /help"""
+        try:
+            chat_id = str(update.effective_chat.id)
+            
+            if not self._is_authorized(chat_id):
+                return
+            
+            self.message_stats["commands"] += 1
+            
+            help_text = """📖 **Справка по командам AGI Layer v3.9**
+
+**🎨 Генерация изображений:**
+`/generate красивый закат над океаном`
+`/generate портрет девушки в стиле ренессанс`
+
+**👁️ Анализ изображений:**
+Просто отправьте фото - я его проанализирую
+
+**🧠 Память и знания:**
+`/memory запомни что сегодня хорошая погода`
+`/memory найди информацию о Python`
+
+**📊 Отчеты и аналитика:**
+`/report создай отчет по задачам за неделю`
+`/report статистика использования системы`
+
+**⚙️ Системные команды:**
+`/status` - статус всех агентов
+`/help` - эта справка
+
+**💬 Естественное общение:**
+Можете просто писать мне как обычному собеседнику - я пойму ваши намерения и выполню нужные действия!
+
+**Примеры:**
+• "Нарисуй кота в космосе" → генерация изображения
+• "Что на этом фото?" + фото → анализ изображения  
+• "Запомни мой любимый цвет - синий" → сохранение в память
+• "Какая погода была вчера?" → поиск в памяти"""
+            
+            await update.message.reply_text(help_text, parse_mode='Markdown')
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка обработки /help: {e}")
+    
+    async def _handle_status(self, update: Update, context):
         """Обработка команды /status"""
-        if not await self._check_authorization(update):
-            await update.message.reply_text("Доступ запрещен")
-            return
-            
-        await self._log_telegram_message(update, "status")
-        
         try:
-            # Получение статуса системы от MetaAgent
-            status_data = await self._get_system_status()
+            chat_id = str(update.effective_chat.id)
             
-            status_text = "📊 Статус системы AGI Layer v3.9:\n\n"
+            if not self._is_authorized(chat_id):
+                return
             
-            for agent_name, agent_data in status_data.get('agents', {}).items():
-                status_emoji = {
-                    'running': '🟢',
-                    'stopped': '🔴', 
-                    'error': '🔴',
-                    'restarting': '🟡'
-                }.get(agent_data['status'], '⚪')
+            self.message_stats["commands"] += 1
+            
+            # Запрашиваем статус у MetaAgent
+            result = await self.send_to_agent("meta_agent", "list_agents", {})
+            
+            if result and result.get("status") == "success":
+                active_agents = result.get("active_agents", [])
                 
-                status_text += f"{status_emoji} {agent_name}: {agent_data['status']}\n"
-                status_text += f"   Задач выполнено: {agent_data['tasks_completed']}\n"
-                status_text += f"   Ошибок: {agent_data['errors_count']}\n"
-                status_text += f"   CPU: {agent_data['cpu_usage']:.1f}%\n"
-                status_text += f"   RAM: {agent_data['memory_usage']:.1f}MB\n\n"
-            
-            await update.message.reply_text(status_text)
-            
-        except Exception as e:
-            await update.message.reply_text(f"Ошибка получения статуса: {e}")
-            self.logger.error(f"Ошибка получения статуса: {e}")
-    
-    async def _cmd_generate(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка команды /generate"""
-        if not await self._check_authorization(update):
-            await update.message.reply_text("Доступ запрещен")
-            return
-            
-        # Получение промпта из команды
-        prompt = " ".join(context.args) if context.args else "beautiful landscape"
-        
-        await self._log_telegram_message(update, "generate", prompt)
-        
-        try:
-            # Создание задачи генерации изображения
-            task_id = await self._create_image_generation_task(prompt, update.effective_chat.id)
-            
-            await update.message.reply_text(
-                f"🎨 Генерация изображения запущена!\n"
-                f"Промпт: {prompt}\n"
-                f"ID задачи: {task_id}\n"
-                f"Ожидайте результат..."
-            )
-            
-        except Exception as e:
-            await update.message.reply_text(f"Ошибка создания задачи: {e}")
-            self.logger.error(f"Ошибка создания задачи генерации: {e}")
-    
-    async def _cmd_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка команды /report"""
-        if not await self._check_authorization(update):
-            await update.message.reply_text("Доступ запрещен")
-            return
-            
-        await self._log_telegram_message(update, "report")
-        
-        try:
-            # Получение отчета о работе системы
-            report_data = await self._generate_system_report()
-            
-            report_text = f"""
-📈 Отчет о работе системы AGI Layer v3.9
+                status_text = f"""📊 **Статус AGI Layer v3.9**
 
-📅 Дата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**Активные агенты:** {len(active_agents)}/7
 
-🤖 Агенты:
 """
-            
-            for agent_name, stats in report_data.get('agents_stats', {}).items():
-                report_text += f"• {agent_name}: {stats['tasks_completed']} задач, {stats['errors_count']} ошибок\n"
-            
-            report_text += f"\n📊 Общая статистика:\n"
-            report_text += f"• Всего задач: {report_data.get('total_tasks', 0)}\n"
-            report_text += f"• Завершено: {report_data.get('completed_tasks', 0)}\n"
-            report_text += f"• Ошибок: {report_data.get('total_errors', 0)}\n"
-            report_text += f"• Время работы: {report_data.get('uptime', 'N/A')}\n"
-            
-            await update.message.reply_text(report_text)
-            
-        except Exception as e:
-            await update.message.reply_text(f"Ошибка генерации отчета: {e}")
-            self.logger.error(f"Ошибка генерации отчета: {e}")
-    
-    async def _cmd_reboot(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка команды /reboot"""
-        if not await self._check_authorization(update):
-            await update.message.reply_text("Доступ запрещен")
-            return
-            
-        await self._log_telegram_message(update, "reboot")
-        
-        try:
-            # Создание задачи перезапуска системы
-            task_id = await self._create_reboot_task()
-            
-            await update.message.reply_text(
-                f"🔄 Перезапуск системы инициирован!\n"
-                f"ID задачи: {task_id}\n"
-                f"Система будет перезапущена..."
-            )
-            
-        except Exception as e:
-            await update.message.reply_text(f"Ошибка инициирования перезапуска: {e}")
-            self.logger.error(f"Ошибка инициирования перезапуска: {e}")
-    
-    async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка обычных сообщений"""
-        if not await self._check_authorization(update):
-            await update.message.reply_text("Доступ запрещен")
-            return
-            
-        message_text = update.message.text
-        await self._log_telegram_message(update, "message", message_text)
-        
-        # Простая обработка сообщений - можно расширить
-        response = await self._process_user_message(message_text)
-        await update.message.reply_text(response)
-    
-    async def _process_user_message(self, message: str) -> str:
-        """Обработка пользовательского сообщения"""
-        # Простая логика - можно интегрировать с TextAgent
-        if "статус" in message.lower():
-            return "Используйте команду /status для получения статуса системы"
-        elif "генерация" in message.lower() or "изображение" in message.lower():
-            return "Используйте команду /generate [описание] для генерации изображения"
-        else:
-            return "Используйте команды для управления системой. /start для списка команд."
-    
-    async def _get_system_status(self) -> Dict[str, Any]:
-        """Получение статуса системы от MetaAgent"""
-        try:
-            url = "http://meta_agent:8000/status"
-            async with self.http_session.get(url) as response:
-                if response.status == 200:
-                    return await response.json()
-        except Exception as e:
-            self.logger.error(f"Ошибка получения статуса системы: {e}")
-        
-        return {"agents": {}}
-    
-    async def _create_image_generation_task(self, prompt: str, chat_id: int) -> str:
-        """Создание задачи генерации изображения"""
-        try:
-            url = "http://meta_agent:8000/create_task"
-            data = {
-                "task_type": "image_generation",
-                "data": {
-                    "prompt": prompt,
-                    "chat_id": chat_id,
-                    "user_request": True
-                },
-                "priority": 2
-            }
-            
-            async with self.http_session.post(url, json=data) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    return result.get("task_id", "unknown")
-        except Exception as e:
-            self.logger.error(f"Ошибка создания задачи генерации: {e}")
-            
-        raise Exception("Не удалось создать задачу генерации")
-    
-    async def _create_reboot_task(self) -> str:
-        """Создание задачи перезапуска системы"""
-        try:
-            url = "http://meta_agent:8000/create_task"
-            data = {
-                "task_type": "system_reboot",
-                "data": {
-                    "reason": "telegram_command",
-                    "user_request": True
-                },
-                "priority": 3
-            }
-            
-            async with self.http_session.post(url, json=data) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    return result.get("task_id", "unknown")
-        except Exception as e:
-            self.logger.error(f"Ошибка создания задачи перезапуска: {e}")
-            
-        raise Exception("Не удалось создать задачу перезапуска")
-    
-    async def _generate_system_report(self) -> Dict[str, Any]:
-        """Генерация отчета о работе системы"""
-        try:
-            async with self.db_pool.acquire() as conn:
-                # Статистика агентов
-                agents_stats = {}
-                rows = await conn.fetch("SELECT * FROM agents")
-                for row in rows:
-                    agents_stats[row['name']] = {
-                        'tasks_completed': row['tasks_completed'],
-                        'errors_count': row['errors_count'],
-                        'status': row['status']
-                    }
                 
-                # Общая статистика
-                total_tasks = await conn.fetchval("SELECT COUNT(*) FROM tasks")
-                completed_tasks = await conn.fetchval("SELECT COUNT(*) FROM tasks WHERE status = 'completed'")
-                total_errors = await conn.fetchval("SELECT SUM(errors_count) FROM agents")
-                
-                return {
-                    'agents_stats': agents_stats,
-                    'total_tasks': total_tasks,
-                    'completed_tasks': completed_tasks,
-                    'total_errors': total_errors,
-                    'uptime': 'N/A'  # Можно добавить расчет времени работы
+                agent_names = {
+                    "meta_agent": "🧠 MetaAgent (координатор)",
+                    "telegram_agent": "💬 TelegramAgent (этот бот)",
+                    "image_gen_agent": "🎨 ImageGenAgent (генерация)",
+                    "vision_agent": "👁️ VisionAgent (анализ изображений)",
+                    "memory_agent": "🧠 MemoryAgent (память)",
+                    "report_agent": "📊 ReportAgent (отчеты)",
+                    "watchdog_agent": "⚙️ WatchdogAgent (мониторинг)"
                 }
                 
+                for agent, description in agent_names.items():
+                    status = "🟢 Работает" if agent in active_agents else "🔴 Не активен"
+                    status_text += f"{description}: {status}\n"
+                
+                status_text += f"\n**Статистика сообщений:**\n"
+                status_text += f"📥 Получено: {self.message_stats['received']}\n"
+                status_text += f"📤 Отправлено: {self.message_stats['sent']}\n"
+                status_text += f"⚡ Команд: {self.message_stats['commands']}\n"
+                status_text += f"❌ Ошибок: {self.message_stats['errors']}\n"
+                
+            else:
+                status_text = "❌ Не удалось получить статус системы"
+            
+            await update.message.reply_text(status_text, parse_mode='Markdown')
+            
         except Exception as e:
-            self.logger.error(f"Ошибка генерации отчета: {e}")
-            return {}
+            self.logger.error(f"Ошибка обработки /status: {e}")
+            self.message_stats["errors"] += 1
     
-    async def _log_telegram_message(self, update: Update, message_type: str, message_text: str = ""):
-        """Логирование сообщения Telegram"""
+    async def _handle_generate(self, update: Update, context):
+        """Обработка команды /generate"""
         try:
-            async with self.db_pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO telegram_messages 
-                    (chat_id, user_id, message_text, message_type, processed_at)
-                    VALUES ($1, $2, $3, $4, $5)
-                    """,
-                    update.effective_chat.id,
-                    update.effective_user.id,
-                    message_text,
-                    message_type,
-                    datetime.now()
+            chat_id = str(update.effective_chat.id)
+            
+            if not self._is_authorized(chat_id):
+                return
+            
+            self.message_stats["commands"] += 1
+            
+            # Получаем описание изображения
+            prompt = " ".join(context.args) if context.args else ""
+            
+            if not prompt:
+                await update.message.reply_text(
+                    "❓ Укажите описание изображения:\n`/generate красивый закат над океаном`",
+                    parse_mode='Markdown'
                 )
+                return
+            
+            # Отправляем уведомление о начале генерации
+            status_message = await update.message.reply_text(
+                f"🎨 Генерирую изображение: *{prompt}*\n⏳ Это может занять 1-2 минуты...",
+                parse_mode='Markdown'
+            )
+            
+            # Отправляем задачу на генерацию
+            result = await self.send_to_agent("image_gen_agent", "generate_image", {
+                "prompt": prompt,
+                "chat_id": chat_id,
+                "user_id": str(update.effective_user.id)
+            })
+            
+            if result and result.get("status") == "success":
+                # Удаляем статусное сообщение
+                await status_message.delete()
+                
+                # Отправляем результат
+                image_path = result.get("image_path")
+                if image_path and os.path.exists(image_path):
+                    with open(image_path, 'rb') as photo:
+                        await update.message.reply_photo(
+                            photo=photo,
+                            caption=f"🎨 *{prompt}*\n\n✨ Изображение создано AGI Layer v3.9",
+                            parse_mode='Markdown'
+                        )
+                else:
+                    await update.message.reply_text(
+                        f"✅ Изображение создано!\n🎨 *{prompt}*",
+                        parse_mode='Markdown'
+                    )
+            else:
+                await status_message.edit_text(
+                    f"❌ Ошибка генерации изображения: {result.get('error', 'Неизвестная ошибка')}"
+                )
+            
         except Exception as e:
-            self.logger.error(f"Ошибка логирования Telegram сообщения: {e}")
+            self.logger.error(f"Ошибка обработки /generate: {e}")
+            self.message_stats["errors"] += 1
+    
+    async def _handle_report(self, update: Update, context):
+        """Обработка команды /report"""
+        try:
+            chat_id = str(update.effective_chat.id)
+            
+            if not self._is_authorized(chat_id):
+                return
+            
+            self.message_stats["commands"] += 1
+            
+            # Отправляем задачу на создание отчета
+            result = await self.send_to_agent("report_agent", "generate_report", {
+                "report_type": "system_status",
+                "chat_id": chat_id
+            })
+            
+            if result and result.get("status") == "success":
+                report_text = result.get("report", "Отчет создан успешно")
+                await update.message.reply_text(
+                    f"📊 **Системный отчет**\n\n{report_text}",
+                    parse_mode='Markdown'
+                )
+            else:
+                await update.message.reply_text("❌ Ошибка создания отчета")
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка обработки /report: {e}")
+    
+    async def _handle_memory(self, update: Update, context):
+        """Обработка команды /memory"""
+        try:
+            chat_id = str(update.effective_chat.id)
+            
+            if not self._is_authorized(chat_id):
+                return
+            
+            self.message_stats["commands"] += 1
+            
+            query = " ".join(context.args) if context.args else ""
+            
+            if not query:
+                await update.message.reply_text(
+                    "❓ Укажите запрос для работы с памятью:\n`/memory запомни что сегодня хорошая погода`\n`/memory найди информацию о Python`",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            # Определяем тип операции
+            if query.lower().startswith(("запомни", "сохрани", "remember")):
+                task_type = "memory_store"
+                data = {"content": query, "user_id": str(update.effective_user.id)}
+            else:
+                task_type = "memory_search"
+                data = {"query": query, "user_id": str(update.effective_user.id)}
+            
+            result = await self.send_to_agent("memory_agent", task_type, data)
+            
+            if result and result.get("status") == "success":
+                response = result.get("response", "Операция выполнена")
+                await update.message.reply_text(f"🧠 {response}")
+            else:
+                await update.message.reply_text("❌ Ошибка работы с памятью")
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка обработки /memory: {e}")
+    
+    async def _handle_message(self, update: Update, context):
+        """Обработка обычных сообщений"""
+        try:
+            chat_id = str(update.effective_chat.id)
+            
+            if not self._is_authorized(chat_id):
+                return
+            
+            self.message_stats["received"] += 1
+            
+            message_text = update.message.text
+            user_id = str(update.effective_user.id)
+            
+            # Анализируем намерение пользователя
+            intent = await self._analyze_message_intent(message_text)
+            
+            if intent == "image_generation":
+                # Генерация изображения
+                await self._handle_natural_generate(update, message_text)
+            elif intent == "question":
+                # Поиск в памяти или общий ответ
+                await self._handle_natural_question(update, message_text)
+            elif intent == "memory_store":
+                # Сохранение в память
+                await self._handle_natural_memory(update, message_text)
+            else:
+                # Общее взаимодействие
+                await self._handle_natural_conversation(update, message_text)
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка обработки сообщения: {e}")
+            self.message_stats["errors"] += 1
+    
+    async def _handle_photo(self, update: Update, context):
+        """Обработка фотографий"""
+        try:
+            chat_id = str(update.effective_chat.id)
+            
+            if not self._is_authorized(chat_id):
+                return
+            
+            self.message_stats["received"] += 1
+            
+            # Получаем фото
+            photo = update.message.photo[-1]  # Берем самое большое разрешение
+            file = await photo.get_file()
+            
+            # Сохраняем временно
+            photo_path = f"/workspace/data/temp_photo_{datetime.now().timestamp()}.jpg"
+            await file.download_to_drive(photo_path)
+            
+            # Отправляем на анализ
+            status_message = await update.message.reply_text("👁️ Анализирую изображение...")
+            
+            result = await self.send_to_agent("vision_agent", "analyze_image", {
+                "image_path": photo_path,
+                "chat_id": chat_id
+            })
+            
+            if result and result.get("status") == "success":
+                analysis = result.get("analysis", "Изображение проанализировано")
+                await status_message.edit_text(f"👁️ **Анализ изображения:**\n\n{analysis}")
+            else:
+                await status_message.edit_text("❌ Ошибка анализа изображения")
+            
+            # Удаляем временный файл
+            if os.path.exists(photo_path):
+                os.remove(photo_path)
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка обработки фото: {e}")
+    
+    async def _handle_callback(self, update: Update, context):
+        """Обработка callback кнопок"""
+        try:
+            query = update.callback_query
+            await query.answer()
+            
+            chat_id = str(query.message.chat.id)
+            
+            if not self._is_authorized(chat_id):
+                return
+            
+            data = query.data
+            
+            if data == "status":
+                await self._handle_status(update, context)
+            elif data == "generate":
+                await query.message.reply_text(
+                    "🎨 Для генерации изображения используйте:\n`/generate [описание]`\n\nНапример: `/generate красивый закат`",
+                    parse_mode='Markdown'
+                )
+            elif data == "report":
+                await self._handle_report(update, context)
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка обработки callback: {e}")
+    
+    async def _analyze_message_intent(self, message: str) -> str:
+        """Анализ намерения пользователя"""
+        message_lower = message.lower()
+        
+        # Генерация изображений
+        if any(word in message_lower for word in [
+            "нарисуй", "создай", "сгенерируй", "изображение", "картинку", "фото"
+        ]):
+            return "image_generation"
+        
+        # Сохранение в память
+        if any(word in message_lower for word in [
+            "запомни", "сохрани", "remember", "note"
+        ]):
+            return "memory_store"
+        
+        # Вопросы
+        if any(word in message_lower for word in [
+            "что", "как", "где", "когда", "почему", "зачем", "?"
+        ]):
+            return "question"
+        
+        return "conversation"
+    
+    async def _handle_natural_generate(self, update: Update, message_text: str):
+        """Естественная генерация изображения"""
+        # Извлекаем описание
+        prompt = message_text
+        for word in ["нарисуй", "создай", "сгенерируй", "изображение", "картинку"]:
+            prompt = prompt.replace(word, "").strip()
+        
+        # Вызываем генерацию
+        context = type('Context', (), {'args': prompt.split()})()
+        await self._handle_generate(update, context)
+    
+    async def _handle_natural_question(self, update: Update, message_text: str):
+        """Обработка естественных вопросов"""
+        result = await self.send_to_agent("memory_agent", "memory_search", {
+            "query": message_text,
+            "user_id": str(update.effective_user.id)
+        })
+        
+        if result and result.get("status") == "success":
+            response = result.get("response", "Информация найдена")
+            await update.message.reply_text(f"🧠 {response}")
+        else:
+            await update.message.reply_text("🤔 Интересный вопрос! Пока не могу на него ответить, но запомню его.")
+    
+    async def _handle_natural_memory(self, update: Update, message_text: str):
+        """Естественное сохранение в память"""
+        result = await self.send_to_agent("memory_agent", "memory_store", {
+            "content": message_text,
+            "user_id": str(update.effective_user.id)
+        })
+        
+        if result and result.get("status") == "success":
+            await update.message.reply_text("✅ Запомнил!")
+        else:
+            await update.message.reply_text("❌ Не удалось сохранить в память")
+    
+    async def _handle_natural_conversation(self, update: Update, message_text: str):
+        """Естественный разговор"""
+        responses = [
+            "Понимаю! Это интересная тема.",
+            "Хорошо, учту это.",
+            "Спасибо за информацию!",
+            "Интересно! Расскажите подробнее.",
+            "Понял вас. Чем еще могу помочь?"
+        ]
+        
+        import random
+        response = random.choice(responses)
+        await update.message.reply_text(response)
+    
+    def _is_authorized(self, chat_id: str) -> bool:
+        """Проверка авторизации пользователя"""
+        if not self.allowed_chat_ids:
+            return True  # Если список пуст, разрешаем всем
+        
+        try:
+            return int(chat_id) in self.allowed_chat_ids
+        except ValueError:
+            return False
+    
+    async def _send_telegram_message(self, chat_id: str, text: str, reply_markup=None):
+        """Отправка сообщения в Telegram"""
+        try:
+            if self.bot:
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode='Markdown',
+                    reply_markup=reply_markup
+                )
+                self.message_stats["sent"] += 1
+        except Exception as e:
+            self.logger.error(f"Ошибка отправки сообщения: {e}")
+            self.message_stats["errors"] += 1
     
     async def process_task(self, task: Task) -> Dict[str, Any]:
-        """Обработка задач TelegramAgent"""
-        if task.task_type == "send_notification":
-            chat_id = task.data.get("chat_id")
-            message = task.data.get("message")
+        """Обработка задач от других агентов"""
+        try:
+            if task.task_type == "send_message":
+                data = task.data
+                await self._send_telegram_message(
+                    chat_id=data.get("chat_id"),
+                    text=data.get("text"),
+                    reply_markup=data.get("reply_markup")
+                )
+                return {"status": "success", "message": "Сообщение отправлено"}
             
-            if chat_id and message:
-                try:
-                    await self.bot.send_message(chat_id=chat_id, text=message)
-                    return {"status": "sent", "chat_id": chat_id}
-                except Exception as e:
-                    return {"status": "error", "error": str(e)}
-        
-        return {"status": "unknown_task_type"}
+            elif task.task_type == "ping":
+                return {"status": "success", "message": "pong"}
+            
+            else:
+                return {"status": "error", "error": f"Неизвестный тип задачи: {task.task_type}"}
+                
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
     
     async def _cleanup_agent(self):
-        """Очистка ресурсов TelegramAgent"""
+        """Очистка ресурсов"""
         if self.application:
             await self.application.stop()
             await self.application.shutdown()
-        
-        self.logger.info("Telegram бот остановлен")
-    
-    async def send_notification(self, chat_id: int, message: str):
-        """Отправка уведомления пользователю"""
-        try:
-            await self.bot.send_message(chat_id=chat_id, text=message)
-            self.logger.info(f"Уведомление отправлено в чат {chat_id}")
-        except Exception as e:
-            self.logger.error(f"Ошибка отправки уведомления: {e}")
 
+
+# Функция запуска
+async def run_telegram_agent(config: Dict[str, Any]):
+    """Запуск Telegram агента"""
+    agent = TelegramAgent(config)
+    await agent.initialize()
+    await agent.start()
+    
+    try:
+        while agent.running:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        print("Получен сигнал остановки")
+    finally:
+        await agent.stop()
+
+
+if __name__ == "__main__":
+    import os
+    from dotenv import load_dotenv
+    
+    load_dotenv()
+    
+    config = {
+        'telegram_token': os.getenv('TELEGRAM_TOKEN'),
+        'telegram_chat_ids': [int(x.strip()) for x in os.getenv('TELEGRAM_CHAT_IDS', '').split(',') if x.strip()],
+        'postgres_host': os.getenv('POSTGRES_HOST', 'localhost'),
+        'postgres_port': int(os.getenv('POSTGRES_PORT', 5432)),
+        'postgres_db': os.getenv('POSTGRES_DB', 'agi_layer'),
+        'postgres_user': os.getenv('POSTGRES_USER', 'agi_user'),
+        'postgres_password': os.getenv('POSTGRES_PASSWORD', 'agi_password')
+    }
+    
+    asyncio.run(run_telegram_agent(config))

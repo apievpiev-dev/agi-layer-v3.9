@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  # Ollama - локальные LLM модели
+  ollama:
+    image: ollama/ollama:latest
+    container_name: agi_ollama_chat
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - agi_network
+    restart: unless-stopped
+    # Для GPU поддержки (если доступна)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Web Chat - интерфейс чата с Ollama
+  web_chat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agi_web_chat
+    environment:
+      - SERVICE_NAME=web_chat
+      - OLLAMA_URL=http://ollama:11434
+      - WEB_UI_PORT=8501
+    volumes:
+      - ./services:/app/services
+      - ./logs:/app/logs
+    ports:
+      - "8501:8501"
+    networks:
+      - agi_network
+    depends_on:
+      - ollama
+    restart: unless-stopped
+    command: streamlit run start_ollama_chat.py --server.port=8501 --server.address=0.0.0.0
+
+volumes:
+  ollama_data:
+
+networks:
+  agi_network:
+    driver: bridge

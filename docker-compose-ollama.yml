@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  # Ollama - локальный LLM сервер
+  ollama:
+    image: ollama/ollama:latest
+    container_name: agi_ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - agi_network
+    restart: unless-stopped
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Ollama Chat Web Interface - веб-интерфейс для чата
+  ollama_chat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agi_ollama_chat
+    environment:
+      - SERVICE_NAME=ollama_chat
+      - OLLAMA_HOST=ollama
+      - OLLAMA_PORT=11434
+    volumes:
+      - ./services:/app/services
+      - ./config:/app/config
+      - ./logs:/app/logs
+    ports:
+      - "8502:8502"
+    networks:
+      - agi_network
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+
+networks:
+  agi_network:
+    driver: bridge

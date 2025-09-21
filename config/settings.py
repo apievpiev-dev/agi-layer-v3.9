@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     # Настройки Telegram
     TELEGRAM_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""
+    TELEGRAM_ALLOWED_CHATS: str = "[]"  # JSON список разрешенных чатов
+    
+    # Настройки чата с нейросетью
+    TELEGRAM_CHAT_ENABLED: bool = True
+    MAX_CONTEXT_MESSAGES: int = 10
+    CHAT_RESPONSE_TIMEOUT: int = 30
+    ENABLE_IMAGE_PROCESSING: bool = True
+    ENABLE_VOICE_MESSAGES: bool = False
+    DEFAULT_PERSONALITY: str = "helpful_assistant"
     
     # Настройки Web UI
     WEB_UI_HOST: str = "0.0.0.0"

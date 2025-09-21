@@ -102,6 +102,43 @@ services:
       - meta_agent
     restart: unless-stopped
 
+  # TelegramChatAgent - полноценный чат с нейросетью
+  telegram_chat_agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agi_telegram_chat_agent
+    environment:
+      - AGENT_NAME=telegram_chat_agent
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=agi_layer
+      - POSTGRES_USER=agi_user
+      - POSTGRES_PASSWORD=agi_password
+      - TELEGRAM_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_ALLOWED_CHATS=${TELEGRAM_ALLOWED_CHATS:-[]}
+      - MAX_CONTEXT_MESSAGES=10
+      - RESPONSE_TIMEOUT=30
+      - ENABLE_IMAGE_PROCESSING=true
+      - ENABLE_VOICE_MESSAGES=false
+      - DEFAULT_PERSONALITY=helpful_assistant
+    volumes:
+      - ./agents:/app/agents
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./models:/app/models
+      - ./output:/app/output
+    ports:
+      - "8009:8000"
+    networks:
+      - agi_network
+    depends_on:
+      - postgres
+      - meta_agent
+      - text_agent
+      - vision_agent
+    restart: unless-stopped
+
   # ImageAgent - генерация изображений
   image_agent:
     build:

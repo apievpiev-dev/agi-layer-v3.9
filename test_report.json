@@ -1,0 +1,104 @@
+{
+  "timestamp": "2025-09-25T14:11:36.791684",
+  "total_time": 68.14,
+  "working_systems": 5,
+  "total_systems": 6,
+  "success_rate": 83.3,
+  "results": {
+    "llm": {
+      "codellama:7b": {
+        "greeting": {
+          "status": "success",
+          "response": "Greetings!",
+          "duration": 0.46
+        },
+        "reasoning": {
+          "status": "success",
+          "response": "The answer to 2+2 is 4.",
+          "duration": 1.19
+        },
+        "creativity": {
+          "status": "success",
+          "response": "Открыть окно\nВсе, что я вижу\nЭто компьютер и мои руки\nРаботают, начиная с нуля\nИзменяя мир\nС помощью...",
+          "duration": 4.71
+        }
+      },
+      "qwen2.5:7b": {
+        "greeting": {
+          "status": "success",
+          "response": "Привет! Как я могу помочь вам сегодня? Если у вас есть вопросы или нужна какая-либо информация, пожа...",
+          "duration": 3.85
+        },
+        "reasoning": {
+          "status": "success",
+          "response": "2 + 2 = 4\n\n这是基本的加法运算。如果你有任何其他问题或需要进一步的帮助，请告诉我！",
+          "duration": 2.8
+        },
+        "creativity": {
+          "status": "success",
+          "response": "Линии кода танцуют,\nПечать ошибок мрачна,\nКомпиляция смеется.",
+          "duration": 3.13
+        }
+      },
+      "phi3:3.8b": {
+        "status": "error",
+        "error": ""
+      },
+      "llama3.2:3b": {
+        "greeting": {
+          "status": "success",
+          "response": "Привет! Как я могу вам помочь?",
+          "duration": 4.83
+        },
+        "reasoning": {
+          "status": "success",
+          "response": "2 + 2 = 4",
+          "duration": 0.87
+        },
+        "creativity": {
+          "status": "success",
+          "response": "В строках неторопа,\nОстается лишь код,\nБезумие в линиях.",
+          "duration": 2.21
+        }
+      }
+    },
+    "whisper": {
+      "status": "success",
+      "model": "whisper-base",
+      "device": "cpu",
+      "languages": [
+        "ru",
+        "en",
+        "auto"
+      ]
+    },
+    "easyocr": {
+      "status": "success",
+      "languages": [
+        "ru",
+        "en"
+      ],
+      "device": "cpu"
+    },
+    "chromadb": {
+      "status": "success",
+      "host": "localhost:8000",
+      "test_query": "OK"
+    },
+    "embeddings": {
+      "status": "success",
+      "model": "all-MiniLM-L6-v2",
+      "embedding_size": 384,
+      "test_texts": 3
+    },
+    "docker": {
+      "status": "success",
+      "services": {
+        "agi-layer-v39_chromadb_1": "chroma",
+        "agi-layer-v39_postgres_1": "Up",
+        "agi-layer-v39_redis_1": "..."
+      },
+      "total_services": 3
+    }
+  }
+}

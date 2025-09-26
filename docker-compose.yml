@@ -1,0 +1,282 @@
+version: '3.8'
+
+services:
+  # PostgreSQL для краткосрочной памяти
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: agi_memory
+      POSTGRES_USER: agi_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./data/postgresql:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agi_user -d agi_memory"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis для межагентного взаимодействия
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ChromaDB для векторной памяти
+  chromadb:
+    image: chromadb/chroma:latest
+    ports:
+      - "18000:8000"
+    volumes:
+      - ./data/chromadb:/chroma/chroma
+    restart: unless-stopped
+    environment:
+      - CHROMA_SERVER_HOST=0.0.0.0
+
+  # Meta Agent - координатор
+  meta-agent:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - postgres
+      - redis
+      - chromadb
+    environment:
+      - AGENT_TYPE=meta
+      - POSTGRES_URL=postgresql://agi_user:${POSTGRES_PASSWORD}@postgres:5432/agi_memory
+      - REDIS_URL=redis://redis:6379
+      - CHROMA_URL=http://chromadb:8000
+    volumes:
+      - ./agents:/app/agents
+      - ./models:/app/models
+      - ./data/logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys,redis,os; r=redis.Redis(host='redis', port=6379); sys.exit(0 if r.ping() else 1)\""]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+
+  # LLM Agent - языковая модель
+  llm-agent:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - meta-agent
+    environment:
+      - AGENT_TYPE=llm
+      - MODEL_NAME=llama3.2:3b
+      - POSTGRES_URL=postgresql://agi_user:${POSTGRES_PASSWORD}@postgres:5432/agi_memory
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./agents:/app/agents
+      - ./models:/app/models
+      - ./data/logs:/app/logs
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 16G
+        reservations:
+          memory: 8G
+    command: ["python", "agents/llm_agent.py"]
+
+  # Vision Agent - компьютерное зрение
+  vision-agent:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - meta-agent
+    environment:
+      - AGENT_TYPE=vision
+      - MODEL_NAME=blip2
+      - POSTGRES_URL=postgresql://agi_user:${POSTGRES_PASSWORD}@postgres:5432/agi_memory
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./agents:/app/agents
+      - ./models:/app/models
+      - ./data/logs:/app/logs
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 4G
+    command: ["python", "agents/vision_agent.py"]
+
+  # Image Generation Agent
+  image-gen-agent:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - meta-agent
+    environment:
+      - AGENT_TYPE=image_gen
+      - MODEL_NAME=stable-diffusion-1.5
+      - POSTGRES_URL=postgresql://agi_user:${POSTGRES_PASSWORD}@postgres:5432/agi_memory
+      - REDIS_URL=redis://redis:6379
+      - HF_HOME=/app/models/cache
+      - HUGGINGFACE_HUB_CACHE=/app/models/cache
+      - TRANSFORMERS_CACHE=/app/models/cache
+      - DIFFUSERS_CACHE=/app/models/cache
+    volumes:
+      - ./agents:/app/agents
+      - ./models:/app/models
+      - ./data/logs:/app/logs
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 12G
+        reservations:
+          memory: 6G
+    command: ["python", "agents/image_gen_agent.py"]
+
+  # TTS Agent - синтез речи
+  tts-agent:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - meta-agent
+    environment:
+      - AGENT_TYPE=tts
+      - MODEL_NAME=silero
+      - POSTGRES_URL=postgresql://agi_user:${POSTGRES_PASSWORD}@postgres:5432/agi_memory
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./agents:/app/agents
+      - ./models:/app/models
+      - ./data/logs:/app/logs
+    restart: unless-stopped
+    command: ["python", "agents/tts_agent.py"]
+
+  # STT Agent - распознавание речи
+  stt-agent:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - meta-agent
+    environment:
+      - AGENT_TYPE=stt
+      - MODEL_NAME=whisper-base
+      - POSTGRES_URL=postgresql://agi_user:${POSTGRES_PASSWORD}@postgres:5432/agi_memory
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./agents:/app/agents
+      - ./models:/app/models
+      - ./data/logs:/app/logs
+    restart: unless-stopped
+    command: ["python", "agents/stt_agent.py"]
+
+  # FastAPI сервер
+  api-server:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - postgres
+      - redis
+      - chromadb
+    environment:
+      - SERVICE_TYPE=api
+      - POSTGRES_URL=postgresql://agi_user:${POSTGRES_PASSWORD}@postgres:5432/agi_memory
+      - REDIS_URL=redis://redis:6379
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    volumes:
+      - ./:/app
+      - ./data/logs:/app/logs
+    ports:
+      - "18080:8080"
+    restart: unless-stopped
+    command: ["python", "test_api.py"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Telegram Bot
+  telegram-bot:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - api-server
+    environment:
+      - SERVICE_TYPE=telegram
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - API_URL=http://api-server:8080
+    volumes:
+      - ./telegram:/app/telegram
+      - ./data/logs:/app/logs
+    restart: unless-stopped
+
+  # Web UI
+  web-ui:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - api-server
+    environment:
+      - SERVICE_TYPE=web
+      - API_URL=http://api-server:8080
+    ports:
+      - "18501:8501"
+    volumes:
+      - ./:/app
+      - ./data/logs:/app/logs
+    restart: unless-stopped
+    command: ["streamlit", "run", "web/app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+
+  # Watchdog - мониторинг
+  watchdog:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - meta-agent
+    environment:
+      - SERVICE_TYPE=watchdog
+      - POSTGRES_URL=postgresql://agi_user:${POSTGRES_PASSWORD}@postgres:5432/agi_memory
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./watchdog:/app/watchdog
+      - ./data/logs:/app/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    privileged: true
+
+volumes:
+  postgres_data:
+  redis_data:
+  chroma_data:
+  models_data:
+  logs_data:
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+
+
+

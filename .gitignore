@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+*.log
+models/
+data/
+logs/
+websnap-venv/
+public/
+*.webm

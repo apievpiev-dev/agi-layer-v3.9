@@ -5,7 +5,11 @@
 
 import os
 from typing import Dict, Any, Optional, List
-from content_factory.config.settings import settings
+
+try:
+    from content_factory.config.settings import settings
+except ImportError:
+    from config.settings import settings
 
 try:
     from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM

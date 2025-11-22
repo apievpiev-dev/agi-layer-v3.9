@@ -6,8 +6,13 @@ import os
 import json
 from typing import Dict, Any, List, Optional
 from pathlib import Path
-from content_factory.config.database import db
-from content_factory.config.settings import settings
+
+try:
+    from content_factory.config.database import db
+    from content_factory.config.settings import settings
+except ImportError:
+    from config.database import db
+    from config.settings import settings
 
 try:
     from PIL import Image, ImageDraw, ImageFont

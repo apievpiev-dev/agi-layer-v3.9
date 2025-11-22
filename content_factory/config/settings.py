@@ -4,7 +4,15 @@
 
 import os
 from typing import Dict, Any, List
-from pydantic import BaseSettings
+
+try:
+    from pydantic import BaseSettings
+except ImportError:
+    # Fallback для случаев без pydantic
+    class BaseSettings:
+        def __init__(self, **kwargs):
+            for key, value in kwargs.items():
+                setattr(self, key, value)
 
 
 class ContentFactorySettings(BaseSettings):

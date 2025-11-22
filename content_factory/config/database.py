@@ -7,7 +7,11 @@ import json
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from pathlib import Path
-from content_factory.config.settings import settings
+
+try:
+    from content_factory.config.settings import settings
+except ImportError:
+    from config.settings import settings
 
 
 class ContentFactoryDB:
@@ -112,7 +116,7 @@ class ContentFactoryDB:
                 target_audience TEXT,
                 keywords TEXT,  -- JSON массив
                 main_points TEXT,  -- JSON массив
-                references TEXT,  -- JSON массив ссылок
+                refs TEXT,  -- JSON массив ссылок (references - зарезервированное слово)
                 requirements TEXT,  -- JSON дополнительные требования
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -361,7 +365,7 @@ class ContentFactoryDB:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO content_specs (plan_id, title, structure, goal, target_audience, keywords, main_points, references, requirements)
+            INSERT INTO content_specs (plan_id, title, structure, goal, target_audience, keywords, main_points, refs, requirements)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             plan_id,

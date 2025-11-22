@@ -3,8 +3,13 @@
 """
 
 from typing import Dict, Any, List, Optional
-from content_factory.config.database import db
-from content_factory.modules.ai_integration import AIIntegration
+
+try:
+    from content_factory.config.database import db
+    from content_factory.modules.ai_integration import AIIntegration
+except ImportError:
+    from config.database import db
+    from modules.ai_integration import AIIntegration
 
 
 class SpecGenerator:
@@ -84,7 +89,7 @@ class SpecGenerator:
             target_audience=audience['name'] if audience else "Общая аудитория",
             keywords=keywords,
             main_points=main_points,
-            references=[],
+            references=[],  # Ссылки на источники
             requirements=self._generate_requirements(plan_item['format'])
         )
         

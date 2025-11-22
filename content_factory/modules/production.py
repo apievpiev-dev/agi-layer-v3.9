@@ -4,9 +4,15 @@
 
 import json
 from typing import Dict, Any, Optional
-from content_factory.config.database import db
-from content_factory.modules.ai_integration import AIIntegration
-from content_factory.config.settings import settings
+
+try:
+    from content_factory.config.database import db
+    from content_factory.modules.ai_integration import AIIntegration
+    from content_factory.config.settings import settings
+except ImportError:
+    from config.database import db
+    from modules.ai_integration import AIIntegration
+    from config.settings import settings
 
 
 class ContentProducer:
